@@ -1,10 +1,10 @@
-Ouroboros = {}
+Minmus = {}
 
 local function makevariant(base, sub)
     return  base | (sub << 4)
 end
 
-Ouroboros.bases = {
+Minmus.bases = {
     LUA_TNONE = (-1),
 
     LUA_TNIL = 0,
@@ -18,21 +18,21 @@ Ouroboros.bases = {
     LUA_TTHREAD = 8,
 }
 
-Ouroboros.typetags = {
-    LUA_VNUMINT = makevariant(Ouroboros.bases.LUA_TNUMBER, 0),
-    LUA_VNUMFLT = makevariant(Ouroboros.bases.LUA_TNUMBER, 1),
+Minmus.typetags = {
+    LUA_VNUMINT = makevariant(Minmus.bases.LUA_TNUMBER, 0),
+    LUA_VNUMFLT = makevariant(Minmus.bases.LUA_TNUMBER, 1),
 
-    LUA_VSHRSTR = makevariant(Ouroboros.bases.LUA_TSTRING, 0),
-    LUA_VLNGSTR = makevariant(Ouroboros.bases.LUA_TSTRING, 1),
+    LUA_VSHRSTR = makevariant(Minmus.bases.LUA_TSTRING, 0),
+    LUA_VLNGSTR = makevariant(Minmus.bases.LUA_TSTRING, 1),
 }
 
 -- https://stackoverflow.com/questions/9168058/how-to-dump-a-table-to-console
-function Ouroboros.dump(o)
+function Minmus.dump(o)
    if type(o) == 'table' then
       local s = '{ '
       for k,v in pairs(o) do
          if type(k) ~= 'number' then k = '"'..k..'"' end
-         s = s .. '['..k..'] = ' .. Ouroboros.dump(v) .. ', '
+         s = s .. '['..k..'] = ' .. Minmus.dump(v) .. ', '
       end
       return s .. '} '
    else
@@ -40,7 +40,7 @@ function Ouroboros.dump(o)
    end
 end
 
-function Ouroboros.new_parser(dump)
+function Minmus.new_parser(dump)
     local parser = { dump = dump, pointer = 1, info = {}}
     function parser:skip_bytes(count)
         self.pointer = self.pointer + count
@@ -84,7 +84,7 @@ function Ouroboros.new_parser(dump)
         return str
     end
     function parser:next_fn()
-        local tags = Ouroboros.typetags
+        local tags = Minmus.typetags
         local fn = {}
         fn.code_str = self:next_string()
         fn.first_defined = self:next_size()
@@ -183,7 +183,7 @@ function Ouroboros.new_parser(dump)
     return parser
 end
 
-function Ouroboros.new_interpreter(parsed_fn)
+function Minmus.new_interpreter(parsed_fn)
     local interpreter = {}
     interpreter.frame = {
         fn = parsed_fn,
@@ -248,7 +248,7 @@ function Ouroboros.new_interpreter(parsed_fn)
     end
 
     function interpreter:ret(retvals)
-        --print("Retval", Ouroboros.dump(retvals))
+        --print("Retval", Minmus.dump(retvals))
         self.frame = self.frame.prev_frame
         self.last_ret = retvals
     end
@@ -260,14 +260,14 @@ function Ouroboros.new_interpreter(parsed_fn)
         print("Opcode", opcode, ins)
         frame.pc = frame.pc + 1
         interpreter[opcode](interpreter, ins)
-        --print(Ouroboros.dump(frame.regs))
+        --print(Minmus.dump(frame.regs))
     end
 
     return interpreter
 end
 
-function Ouroboros.parse(dump)
-    local parser = Ouroboros.new_parser(dump)
+function Minmus.parse(dump)
+    local parser = Minmus.new_parser(dump)
     local info = parser.info
 
     -- Parse header
@@ -285,23 +285,23 @@ function Ouroboros.parse(dump)
     -- 
     parser:next_byte() -- sizeupvalues (?)
     local res = parser:next_fn()
-    --print(Ouroboros.dump(res))
+    --print(Minmus.dump(res))
     --print(dump:sub(parser.pointer))
     return res
 end
 
-function Ouroboros.compile(code)
-    local parsed = Ouroboros.parse(string.dump(load(code)))
-    local interpreter = Ouroboros.new_interpreter(parsed)
+function Minmus.compile(code)
+    local parsed = Minmus.parse(string.dump(load(code)))
+    local interpreter = Minmus.new_interpreter(parsed)
     while interpreter.frame ~= nil do
         interpreter:step()
     end
-    print(Ouroboros.dump(interpreter.last_ret))
+    print(Minmus.dump(interpreter.last_ret))
 end
 
---Ouroboros.parse(string.dump(load("return 'asdfasdf'..tostring(1+2+3)")))
+--Minmus.parse(string.dump(load("return 'asdfasdf'..tostring(1+2+3)")))
 if false then
-    Ouroboros.parse(string.dump(load([[
+    Minmus.parse(string.dump(load([[
         local a = 5
         b = 3
         function lalala()
@@ -310,7 +310,7 @@ if false then
         return lalala()
     ]])))
 end
-Ouroboros.compile([[
+Minmus.compile([[
     local a = 1
     local b = 2
     local c = a + b

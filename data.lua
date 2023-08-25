@@ -3,7 +3,7 @@ local package = ...
 -- files loaded when mod is initializing
 package.includes = {
 	"components.lua",
-	"ouroboros.lua",
+	"minmus.lua",
 }
 
 -- called when mod is initializing
