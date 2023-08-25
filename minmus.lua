@@ -1,8 +1,17 @@
+-- Notes:
+-- fn.protos and fn.constants are zero-indexed
+-- frame.upvals and frame.regs are zero-indexed
+-- frame.top is the first *free* index
+
 Minmus = {}
 
 local function makevariant(base, sub)
     return  base | (sub << 4)
 end
+
+Minmus.kinds = {
+    CLOSURE = "closure"
+}
 
 Minmus.bases = {
     LUA_TNONE = (-1),
@@ -27,17 +36,27 @@ Minmus.typetags = {
 }
 
 -- https://stackoverflow.com/questions/9168058/how-to-dump-a-table-to-console
-function Minmus.dump(o)
-   if type(o) == 'table' then
-      local s = '{ '
-      for k,v in pairs(o) do
-         if type(k) ~= 'number' then k = '"'..k..'"' end
-         s = s .. '['..k..'] = ' .. Minmus.dump(v) .. ', '
-      end
-      return s .. '} '
-   else
-      return tostring(o)
-   end
+function Minmus.dump(o, level)
+    if level == nil then
+        level = 5
+    end
+    if type(o) == 'table' then
+        if level < 0 then
+            return "<table>"
+        end
+        local s = '{ '
+        for k,v in pairs(o) do
+            if k == "upvals" or k == "code_str" then 
+                s = s .. "<" .. k .. ">, " 
+            else
+                if type(k) ~= 'number' then k = '"'..k..'"' end
+                s = s .. '['..k..'] = ' .. Minmus.dump(v, level-1) .. ', '
+            end
+        end
+        return s .. '} '
+    else
+        return tostring(o)
+    end
 end
 
 function Minmus.new_parser(dump)
@@ -122,7 +141,7 @@ function Minmus.new_parser(dump)
                 const.val = self:next_string()
             end
 
-            constants[i] = const
+            constants[i-1] = const
         end
         fn.constants = constants
 
@@ -134,7 +153,7 @@ function Minmus.new_parser(dump)
             upval.instack = self:next_byte()
             upval.idx = self:next_byte()
             upval.kind = self:next_byte()
-            upvals[i] = upval
+            upvals[i-1] = upval
         end
         fn.upvals = upvals
 
@@ -142,7 +161,7 @@ function Minmus.new_parser(dump)
         local protos_count = self:next_size()
         local protos = {}
         for i = 1, protos_count do
-            protos[i] = parser:next_fn()
+            protos[i-1] = parser:next_fn()
         end
 
         fn.protos = protos
@@ -183,15 +202,20 @@ function Minmus.new_parser(dump)
     return parser
 end
 
-function Minmus.new_interpreter(parsed_fn)
-    local interpreter = {}
-    interpreter.frame = {
+function Minmus.new_frame(parsed_fn, upvals)
+    return {
         fn = parsed_fn,
         pc = 1,
         regs = {},
         top = parsed_fn.max_stack_size,
         prev_frame = nil,
+        upvals = upvals,
     }
+end
+
+function Minmus.new_interpreter(parsed_fn)
+    local interpreter = {}
+    interpreter.frame = Minmus.new_frame(parsed_fn, {[0] = {}})
     interpreter.last_ret = nil
 
     function interpreter:e_ABC(ins)
@@ -207,6 +231,12 @@ function Minmus.new_interpreter(parsed_fn)
         local b = (ins >> (7+8)) - offset
         return a, b
     end
+
+    function interpreter:e_ABx(ins)
+        local a = (ins >> 7) & 0xff
+        local b = (ins >> (7+8))
+        return a, b
+    end
     
     function interpreter:e_k(ins)
         return (ins >> (7+8)) & 1
@@ -219,6 +249,25 @@ function Minmus.new_interpreter(parsed_fn)
         }
     end
 
+    interpreter[11] = function(self, ins) -- OP_GETTABUP
+        local a, b, c = self:e_ABC(ins)
+        self.frame.regs[a] = self.frame.upvals[b][self.frame.fn.constants[c].val]
+        --print(Minmus.dump(self.frame.upvals))
+    end
+
+    interpreter[15] = function(self, ins) -- OP_SETTABUP
+        local a, b, c = self:e_ABC(ins)
+        local k = self:e_k(ins)
+        local val
+        if k > 0 then
+            val = self.frame.fn.constants[c]
+        else
+            val = self.frame.regs[c]
+        end
+        self.frame.upvals[a][self.frame.fn.constants[b].val] = val -- TODO figure out keys
+        --print(Minmus.dump(self.frame.upvals))
+    end
+
     interpreter[34] = function(self, ins) -- OP_ADD
         local a, b, c = self:e_ABC(ins)
         local regs = self.frame.regs
@@ -228,6 +277,20 @@ function Minmus.new_interpreter(parsed_fn)
         self.frame.pc = self.frame.pc + 1 -- TODO: metatable support
     end
     
+    interpreter[68] = function(self, ins) -- OP_CALL
+        local a, b, c = self:e_ABC(ins)
+        if b == 0 then
+            b = self.frame.top - a
+        end
+        self.frame.ret_info = {a, c}
+        local cls = self.frame.regs[a]
+        assert(cls.kind == Minmus.kinds.CLOSURE)
+        local new_frame = Minmus.new_frame(cls.proto, cls.upvals)
+        new_frame.prev_frame = self.frame
+        self.frame = new_frame
+        --print(Minmus.dump(self.frame))
+    end
+
     interpreter[70] = function(self, ins) -- OP_RETURN
         local a, b, c = self:e_ABC(ins)
         local k = self:e_k(ins)
@@ -242,6 +305,22 @@ function Minmus.new_interpreter(parsed_fn)
             self:ret(retvals)
         end
     end
+    interpreter[71] = function(self, ins) -- OP_RETURN0
+        self:ret({})
+    end
+    interpreter[72] = function(self, ins) -- OP_RETURN1
+        local a, b, c = self:e_ABC(ins)
+        self:ret({self.frame.regs[a]})
+    end
+
+    interpreter[79] = function(self, ins) -- OP_CLOSURE
+        local a, b = self:e_ABx(ins)
+        self.frame.regs[a] = {
+            kind = Minmus.kinds.CLOSURE,
+            proto = self.frame.fn.protos[b],
+            upvals = self.frame.upvals,
+        }
+    end
 
     interpreter[81] = function(self, ins) -- OP_VARARGPREP
         -- nothing for now
@@ -249,8 +328,22 @@ function Minmus.new_interpreter(parsed_fn)
 
     function interpreter:ret(retvals)
         --print("Retval", Minmus.dump(retvals))
-        self.frame = self.frame.prev_frame
         self.last_ret = retvals
+        if self.frame.prev_frame == nil then
+            self.frame = nil
+            return -- no more code left to run
+        end
+        self.frame = self.frame.prev_frame
+        
+        -- copy retvals to registers
+        local a = self.frame.ret_info[1]
+        local c = self.frame.ret_info[2]
+
+        assert(c ~= 0) -- TODO
+        local regs = self.frame.regs
+        for i = 0, c-2 do
+            regs[a+i] = retvals[i+1]
+        end
     end
 
     function interpreter:step()
@@ -285,7 +378,7 @@ function Minmus.parse(dump)
     -- 
     parser:next_byte() -- sizeupvalues (?)
     local res = parser:next_fn()
-    --print(Minmus.dump(res))
+    print(Minmus.dump(res))
     --print(dump:sub(parser.pointer))
     return res
 end
@@ -311,8 +404,12 @@ if false then
     ]])))
 end
 Minmus.compile([[
+    function get_b()
+        return 2
+    end
+
     local a = 1
-    local b = 2
+    local b = get_b()
     local c = a + b
     return c
     ]])
