@@ -64,7 +64,7 @@ function Ouroboros.new_parser(dump)
     function parser:next_size()
         local x = 0
         repeat
-            b = self:next_byte()
+            local b = self:next_byte()
             x = (x << 7) | (b & 0x7f)
         until b & 0x80 > 0
         return x
@@ -96,7 +96,14 @@ function Ouroboros.new_parser(dump)
         -- code
         local code_count = self:next_size()
         print("Instruction count:", code_count)
-        fn.code = self:next_vector(code_count * parser.info.ins_size)
+        local code = self:next_vector(code_count * parser.info.ins_size)
+        local intcode = {}
+        for i = 1, code_count do
+            local ins_start = (i-1) * 4 + 1
+            intcode[i] = (code:byte(ins_start + 3) << 24) | (code:byte(ins_start + 2) << 16) | (code:byte(ins_start + 1) << 8) | (code:byte(ins_start + 0) << 0)
+        end
+        fn.code = intcode
+        --print(fn.code:byte(1, code_count * parser.info.ins_size))
 
         -- constants
         local constant_count = self:next_size()
@@ -176,6 +183,89 @@ function Ouroboros.new_parser(dump)
     return parser
 end
 
+function Ouroboros.new_interpreter(parsed_fn)
+    local interpreter = {}
+    interpreter.frame = {
+        fn = parsed_fn,
+        pc = 1,
+        regs = {},
+        top = parsed_fn.max_stack_size,
+        prev_frame = nil,
+    }
+    interpreter.last_ret = nil
+
+    function interpreter:e_ABC(ins)
+        local a = (ins >> 7) & 0xff
+        local b = (ins >> (8+8)) & 0xff
+        local c = (ins >> (8+8+8)) & 0xff
+        return a, b, c
+    end
+
+    function interpreter:e_AsBx(ins)
+        local a = (ins >> 7) & 0xff
+        local offset = ((1<<17)-1) >> 1
+        local b = (ins >> (7+8)) - offset
+        return a, b
+    end
+    
+    function interpreter:e_k(ins)
+        return (ins >> (7+8)) & 1
+    end
+
+    interpreter[1]  = function(self, ins) -- OP_LOADI
+        local a, b = self:e_AsBx(ins)
+        self.frame.regs[a] = {
+            val = b
+        }
+    end
+
+    interpreter[34] = function(self, ins) -- OP_ADD
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        regs[a] = {
+            val = regs[b].val + regs[c].val
+        }
+        self.frame.pc = self.frame.pc + 1 -- TODO: metatable support
+    end
+    
+    interpreter[70] = function(self, ins) -- OP_RETURN
+        local a, b, c = self:e_ABC(ins)
+        local k = self:e_k(ins)
+        print(a, b, c)
+        if b == 0 then
+            assert(false) -- TODO
+        else
+            local retvals = {}
+            for i = 1, b-1 do
+                retvals[i] = self.frame.regs[i-1+a]
+            end
+            self:ret(retvals)
+        end
+    end
+
+    interpreter[81] = function(self, ins) -- OP_VARARGPREP
+        -- nothing for now
+    end
+
+    function interpreter:ret(retvals)
+        --print("Retval", Ouroboros.dump(retvals))
+        self.frame = self.frame.prev_frame
+        self.last_ret = retvals
+    end
+
+    function interpreter:step()
+        local frame = self.frame
+        local ins = frame.fn.code[frame.pc]
+        local opcode = ins & 127
+        print("Opcode", opcode, ins)
+        frame.pc = frame.pc + 1
+        interpreter[opcode](interpreter, ins)
+        --print(Ouroboros.dump(frame.regs))
+    end
+
+    return interpreter
+end
+
 function Ouroboros.parse(dump)
     local parser = Ouroboros.new_parser(dump)
     local info = parser.info
@@ -194,10 +284,35 @@ function Ouroboros.parse(dump)
 
     -- 
     parser:next_byte() -- sizeupvalues (?)
-    print(Ouroboros.dump(parser:next_fn()))
+    local res = parser:next_fn()
+    --print(Ouroboros.dump(res))
+    --print(dump:sub(parser.pointer))
+    return res
+end
 
-    print(dump:sub(parser.pointer))
+function Ouroboros.compile(code)
+    local parsed = Ouroboros.parse(string.dump(load(code)))
+    local interpreter = Ouroboros.new_interpreter(parsed)
+    while interpreter.frame ~= nil do
+        interpreter:step()
+    end
+    print(Ouroboros.dump(interpreter.last_ret))
 end
 
 --Ouroboros.parse(string.dump(load("return 'asdfasdf'..tostring(1+2+3)")))
-Ouroboros.parse(string.dump(load("return 1+2+3")))
+if false then
+    Ouroboros.parse(string.dump(load([[
+        local a = 5
+        b = 3
+        function lalala()
+            return a + b
+        end
+        return lalala()
+    ]])))
+end
+Ouroboros.compile([[
+    local a = 1
+    local b = 2
+    local c = a + b
+    return c
+    ]])
