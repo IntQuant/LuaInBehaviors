@@ -14,6 +14,30 @@ function test(code, eres)
 end
 
 test([[
+    local a = {}
+    local b = 5
+    a[b] = "123"
+    return a[b]
+]], "123")
+
+test([[
+    local a = {}
+    a[1] = "123"
+    return a[1]
+]], "123")
+
+test([[
+    local a = {}
+    a.lala = "123"
+    return a.lala
+]], "123")
+
+test([[
+    local a = {}
+    return #a
+]], 0)
+
+test([[
     local a = 10
     local b = 3
     a = a + b

@@ -10,7 +10,8 @@ local function makevariant(base, sub)
 end
 
 Minmus.kinds = {
-    CLOSURE = "closure"
+    TABLE = "table",
+    CLOSURE = "closure",
 }
 
 Minmus.bases = {
@@ -35,8 +36,9 @@ Minmus.typetags = {
     LUA_VLNGSTR = makevariant(Minmus.bases.LUA_TSTRING, 1),
 }
 
-local binops = {}
+local autoops = {}
 local binops_list = {"+", "-", "*", "%", "^", "/", "//", "&", "|", "~"}
+local unops_list = {"-", "~", "not", "#"}
 
 for op_i = 1, #binops_list do
     local binop = binops_list[op_i]
@@ -63,11 +65,26 @@ for op_i = 1, #binops_list do
     ]]
     local fn_const = load(src_const)()
     local fn_regs = load(src_regs)()
-    binops[22+op_i-1] = fn_const
-    binops[34+op_i-1] = fn_regs
+    autoops[22+op_i-1] = fn_const
+    autoops[34+op_i-1] = fn_regs
 end
 
-Minmus.binops = binops
+for op_i = 1, #unops_list do
+    local unop = unops_list[op_i]
+    local src = [[
+        return function(self, ins)
+            local a, b, c = self:e_ABC(ins)
+            local regs = self.frame.regs
+            regs[a] = {
+                val = ]] .. unop .. [[regs[b].val
+            }
+            -- TODO: metatable support
+        end
+    ]]
+    autoops[op_i - 1 + 49] = load(src)()
+end
+
+Minmus.autoops = autoops
 
 -- https://stackoverflow.com/questions/9168058/how-to-dump-a-table-to-console
 function Minmus.dump(o, level)
@@ -370,6 +387,36 @@ function Minmus.new_interpreter(parsed_fn)
         --print(Minmus.dump(self.frame.upvals))
     end
 
+    -- tables have to be stored in a special way so that:
+    -- 1. the original key can be retrieved
+    -- 2. metatables can be supported
+    function interpreter:pseudotable_set(tbl, ind, val)
+        -- TODO error handling
+        tbl[ind.val] = {
+            key = ind,
+            item = val,
+        }
+    end
+    function interpreter:pseudotable_get(tbl, ind)
+        return tbl[ind.val].item
+    end
+
+    interpreter[12] = function(self, ins) -- OP_GETTABLE
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        regs[a] = self:pseudotable_get(regs[b], regs[c])
+    end
+    interpreter[13] = function(self, ins) -- OP_GETI
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        regs[a] = self:pseudotable_get(regs[b], {val = c})
+    end
+    interpreter[14] = function(self, ins) -- OP_GETFIELD
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        regs[a] = self:pseudotable_get(regs[b], self.frame.fn.constants[c])
+    end
+
     interpreter[15] = function(self, ins) -- OP_SETTABUP
         local a, b, c = self:e_ABC(ins)
         local k = self:e_k(ins)
@@ -383,6 +430,43 @@ function Minmus.new_interpreter(parsed_fn)
         print("Set upval", a, key)
         self.frame.upvals[a][key] = val -- TODO figure out keys
         --print(Minmus.dump(self.frame.upvals))
+    end
+
+    interpreter[16] = function(self, ins) -- OP_SETTABLE
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        if self:e_k(ins) > 0 then
+            self:pseudotable_set(regs[a], regs[b], self.frame.fn.constants[c])
+        else
+            self:pseudotable_set(regs[a], regs[b], regs[c])
+        end
+    end
+    interpreter[17] = function(self, ins) -- OP_SETI
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        if self:e_k(ins) > 0 then
+            self:pseudotable_set(regs[a], {val = b}, self.frame.fn.constants[c])
+        else
+            self:pseudotable_set(regs[a], {val = b}, regs[c])
+        end
+    end
+    interpreter[18] = function(self, ins) -- OP_SETFIELD
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        if self:e_k(ins) > 0 then
+            self:pseudotable_set(regs[a], self.frame.fn.constants[b], self.frame.fn.constants[c])
+        else
+            self:pseudotable_set(regs[a], self.frame.fn.constants[b], regs[c])
+        end
+    end
+
+    interpreter[19] = function(self, ins) -- OP_NEWTABLE
+        local a, _, _ = self:e_ABC(ins)
+        self.frame.pc = self.frame.pc + 1
+        self.frame.regs[a] = {
+            kind = Minmus.kinds.TABLE,
+            val = {},
+        }
     end
 
     interpreter[21] = function(self, ins) -- OP_ADDI
@@ -581,7 +665,7 @@ function Minmus.new_interpreter(parsed_fn)
         --print(Minmus.dump(frame.regs))
     end
 
-    for k, v in pairs(Minmus.binops) do
+    for k, v in pairs(Minmus.autoops) do
         interpreter[k] = v
     end
 
