@@ -14,6 +14,26 @@ function test(code, eres)
 end
 
 test([[
+    local v = true
+    if v then
+        a = 5
+        b = 6
+        return a+b
+    else
+        return 0
+    end
+]], 11)
+
+test([[
+    local v = false
+    if v then
+        return 1
+    else
+        return 0
+    end
+]], 0)
+
+test([[
     local a = 0
     for i = 1, 3 do
         a = a + i

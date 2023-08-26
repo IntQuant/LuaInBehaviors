@@ -293,6 +293,27 @@ function Minmus.new_interpreter(parsed_fn)
         }
     end
 
+    interpreter[5] = function(self, ins) -- OP_LOADFALSE
+        local a, b, c = self:e_ABC(ins)
+        self.frame.regs[a] = {
+            val = false
+        }
+    end
+
+    interpreter[7] = function(self, ins) -- OP_LOADTRUE
+        local a, b, c = self:e_ABC(ins)
+        self.frame.regs[a] = {
+            val = true
+        }
+    end
+
+    interpreter[8] = function(self, ins) -- OP_LOADNIL
+        local a, b, c = self:e_ABC(ins)
+        self.frame.regs[a] = {
+            val = nil
+        }
+    end
+
     interpreter[9] = function(self, ins) -- OP_GETUPVAL
         local a, b, c = self:e_ABC(ins)
         print("Get upval", b, a)
@@ -338,6 +359,20 @@ function Minmus.new_interpreter(parsed_fn)
             val = regs[b].val + regs[c].val
         }
         self.frame.pc = self.frame.pc + 1 -- TODO: metatable support
+    end
+
+    interpreter[56] = function(self, ins) -- OP_JMP
+        local sj = (ins >> 7) - (((1 << 25) - 1) >> 1)
+        print("Jmp", sj)
+        self.frame.pc = self.frame.pc + sj
+    end
+
+    interpreter[66] = function(self, ins) -- OP_TEST
+        local a, b, c = self:e_ABC(ins)
+        local k = self:e_k(ins) > 0
+        if not (self.frame.regs[a].val == k) then
+            self.frame.pc = self.frame.pc + 1
+        end
     end
     
     interpreter[68] = function(self, ins) -- OP_CALL
