@@ -74,6 +74,16 @@ function Minmus.dump_regs(regs, name)
     print("End of", name)
 end
 
+function Minmus.copyval(from, to)
+    to.val = from.val
+    to.kind = from.kind
+    to.proto = from.proto    
+end
+
+function Minmus.is_int(val)
+    return math.type(val) == 'integer'
+end
+
 function Minmus.new_parser(dump)
     local parser = { dump = dump, pointer = 1, info = {}}
     function parser:skip_bytes(count)
@@ -290,6 +300,13 @@ function Minmus.new_interpreter(parsed_fn)
         --print(Minmus.dump(self.frame.upvals))
     end
 
+    interpreter[10] = function(self, ins) -- OP_SETUPVAL
+        local a, b, c = self:e_ABC(ins)
+        local val = self.frame.regs[a]
+        local upval = self.frame.upvals[b]
+        Minmus.copyval(val, upval)
+    end
+
     interpreter[11] = function(self, ins) -- OP_GETTABUP
         local a, b, c = self:e_ABC(ins)
         local key = self.frame.fn.constants[c].val
@@ -364,13 +381,67 @@ function Minmus.new_interpreter(parsed_fn)
         local a, b, c = self:e_ABC(ins)
         self:ret({self.frame.regs[a]})
     end
+    
+    interpreter[73] = function(self, ins) -- OP_FORLOOP
+        local a, b = self:e_ABx(ins)
+        local regs = self.frame.regs
+        
+        local init = regs[a].val
+        local limit = regs[a+1].val
+        local step = regs[a+2].val
+        
+        local stepsign = 0 < step
+        if (stepsign and limit <= init) or (not stepsign and limit >= init) then
+            return
+        else
+            init = init + step
+            regs[a].val = init
+            regs[a+3].val = init
+            self.frame.pc = self.frame.pc - b
+        end
+    end
+
+    interpreter[74] = function(self, ins) -- OP_FORPREP
+        local a, b = self:e_ABx(ins)
+        local regs = self.frame.regs
+        
+        local init = tonumber(regs[a].val)
+        local limit = tonumber(regs[a+1].val)
+        local step = tonumber(regs[a+2].val)
+        if init == nil or limit == nil or step == nil then
+            self:err("could not convert 'for' vars to numbers")
+        end
+        if step == 0 then
+            self:err("'for' step is zero")
+        end
+        
+        local stepsign = 0 < step
+        if (stepsign and limit < init) or (not stepsign and limit > init) then
+            self.frame.pc = self.frame.pc + b + 1
+            return
+        end
+
+        regs[a] = {
+            val = init
+        }
+        regs[a+1] = {
+            val = limit
+        }
+        regs[a+2] = {
+            val = step
+        }
+        regs[a+3] = {
+            val = init
+        }
+    end
+
 
     interpreter[79] = function(self, ins) -- OP_CLOSURE
         local a, b = self:e_ABx(ins)
         self.frame.regs[a] = {
             kind = Minmus.kinds.CLOSURE,
             proto = self.frame.fn.protos[b],
-            upvals = self.frame.upvals,
+            --upvals = self.frame.upvals,
         }
     end
 
@@ -396,6 +467,11 @@ function Minmus.new_interpreter(parsed_fn)
         for i = 0, c-2 do
             regs[a+i] = retvals[i+1]
         end
+    end
+
+    function interpreter:err(err)
+        print(err)
+        assert(false)
     end
 
     function interpreter:step()
@@ -446,28 +522,7 @@ function Minmus.compile_and_run(code)
         interpreter:step()
     end
     print(Minmus.dump(interpreter.last_ret))
+    return interpreter.last_ret
 end
 
 --Minmus.parse(string.dump(load("return 'asdfasdf'..tostring(1+2+3)")))
-if true then
-    Minmus.compile_and_run([[
-        local a = 5
-        b = 3
-        function lalala()
-            return a + b
-        end
-        return lalala()
-    ]])
-end
-if false then
-    Minmus.compile_and_run([[
-        function get_b()
-            return 2
-        end
-
-        local a = 1
-        local b = get_b()
-        local c = a + b
-        return c
-    ]])
-end
