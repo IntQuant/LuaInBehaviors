@@ -1,5 +1,5 @@
 -- Notes:
--- fn.protos and fn.constants are zero-indexed
+-- fn.protos and fn.constants and fn.upvals are zero-indexed
 -- frame.upvals and frame.regs are zero-indexed
 -- frame.top is the first *free* index
 
@@ -46,7 +46,7 @@ function Minmus.dump(o, level)
         end
         local s = '{ '
         for k,v in pairs(o) do
-            if k == "upvals" or k == "code_str" then 
+            if k == "code_str" then 
                 s = s .. "<" .. k .. ">, " 
             else
                 if type(k) ~= 'number' then k = '"'..k..'"' end
@@ -57,6 +57,21 @@ function Minmus.dump(o, level)
     else
         return tostring(o)
     end
+end
+
+function Minmus.dump_regs(regs, name)
+    local name = name or "regs"
+    print("Current", name)
+    for i = 0, #regs do
+        if regs[i] ~= nil then
+            if regs[i].kind == Minmus.kinds.CLOSURE then 
+                print(i, "kind", regs[i].kind)
+            else
+                print(i, Minmus.dump(regs[i]))
+            end
+        end
+    end
+    print("End of", name)
 end
 
 function Minmus.new_parser(dump)
@@ -150,7 +165,7 @@ function Minmus.new_parser(dump)
         local upvals = {}
         for i = 1, upval_count do
             local upval = {}
-            upval.instack = self:next_byte()
+            upval.instack = self:next_byte() > 0
             upval.idx = self:next_byte()
             upval.kind = self:next_byte()
             upvals[i-1] = upval
@@ -190,32 +205,51 @@ function Minmus.new_parser(dump)
         end
 
         local upvals_count = self:next_size()
-        fn.upvals = {}
         for i = 1, upvals_count do
-            local upval = {}
-            upval.name = self:next_string()
-            fn.upvals[i] = upval
+            fn.upvals[i-1].name = self:next_string()
         end
-
+        
+        print(Minmus.dump(fn.upvals))
         return fn
     end
     return parser
 end
 
-function Minmus.new_frame(parsed_fn, upvals)
+function Minmus.new_frame(parsed_fn, prev_frame)
+    local upvals = {}
+    Minmus.dump_regs(prev_frame.regs)
+    if parsed_fn.upvals[0] ~= nil then
+        for i = 0, #parsed_fn.upvals do
+            local upval_info = parsed_fn.upvals[i]
+            print("Creating upval", i, Minmus.dump(upval_info))
+            if upval_info.instack then
+                upvals[i] = prev_frame.regs[upval_info.idx]
+            else
+                upvals[i] = prev_frame.upvals[upval_info.idx]
+            end
+        end
+    end
+    --Minmus.dump_regs(upvals, "upvals")
+    --Minmus.dump_regs(prev_frame.upvals, "prev upvals")
+    
     return {
         fn = parsed_fn,
         pc = 1,
         regs = {},
         top = parsed_fn.max_stack_size,
-        prev_frame = nil,
+        prev_frame = prev_frame,
         upvals = upvals,
     }
 end
 
 function Minmus.new_interpreter(parsed_fn)
     local interpreter = {}
-    interpreter.frame = Minmus.new_frame(parsed_fn, {[0] = {}})
+    local pseudoframe = {
+        regs = {[0] = {}},
+        upvals = {},
+        is_pseudoframe = true,
+    }
+    interpreter.frame = Minmus.new_frame(parsed_fn, pseudoframe)
     interpreter.last_ret = nil
 
     function interpreter:e_ABC(ins)
@@ -249,9 +283,18 @@ function Minmus.new_interpreter(parsed_fn)
         }
     end
 
+    interpreter[9] = function(self, ins) -- OP_GETUPVAL
+        local a, b, c = self:e_ABC(ins)
+        print("Get upval", b, a)
+        self.frame.regs[a] = self.frame.upvals[b]
+        --print(Minmus.dump(self.frame.upvals))
+    end
+
     interpreter[11] = function(self, ins) -- OP_GETTABUP
         local a, b, c = self:e_ABC(ins)
-        self.frame.regs[a] = self.frame.upvals[b][self.frame.fn.constants[c].val]
+        local key = self.frame.fn.constants[c].val
+        print("Get upval", b, key, a)
+        self.frame.regs[a] = self.frame.upvals[b][key]
         --print(Minmus.dump(self.frame.upvals))
     end
 
@@ -264,11 +307,14 @@ function Minmus.new_interpreter(parsed_fn)
         else
             val = self.frame.regs[c]
         end
-        self.frame.upvals[a][self.frame.fn.constants[b].val] = val -- TODO figure out keys
+        local key = self.frame.fn.constants[b].val
+        print("Set upval", a, key)
+        self.frame.upvals[a][key] = val -- TODO figure out keys
         --print(Minmus.dump(self.frame.upvals))
     end
 
     interpreter[34] = function(self, ins) -- OP_ADD
+        Minmus.dump_regs(self.frame.regs)
         local a, b, c = self:e_ABC(ins)
         local regs = self.frame.regs
         regs[a] = {
@@ -278,6 +324,7 @@ function Minmus.new_interpreter(parsed_fn)
     end
     
     interpreter[68] = function(self, ins) -- OP_CALL
+        print("Call")
         local a, b, c = self:e_ABC(ins)
         if b == 0 then
             b = self.frame.top - a
@@ -285,13 +332,18 @@ function Minmus.new_interpreter(parsed_fn)
         self.frame.ret_info = {a, c}
         local cls = self.frame.regs[a]
         assert(cls.kind == Minmus.kinds.CLOSURE)
-        local new_frame = Minmus.new_frame(cls.proto, cls.upvals)
+        local new_frame = Minmus.new_frame(cls.proto, self.frame)
         new_frame.prev_frame = self.frame
         self.frame = new_frame
         --print(Minmus.dump(self.frame))
     end
 
-    interpreter[70] = function(self, ins) -- OP_RETURN
+    interpreter[69] = function(self, ins) -- OP_TAILCALL -- TODO figure out k (closing upvals)
+        self[68](self, ins)
+        self.frame.prev_frame = self.frame.prev_frame.prev_frame
+    end
+
+    interpreter[70] = function(self, ins) -- OP_RETURN -- TODO figure out k (closing upvals)
         local a, b, c = self:e_ABC(ins)
         local k = self:e_k(ins)
         print(a, b, c)
@@ -329,7 +381,7 @@ function Minmus.new_interpreter(parsed_fn)
     function interpreter:ret(retvals)
         --print("Retval", Minmus.dump(retvals))
         self.last_ret = retvals
-        if self.frame.prev_frame == nil then
+        if self.frame.prev_frame.is_pseudoframe then
             self.frame = nil
             return -- no more code left to run
         end
@@ -378,14 +430,18 @@ function Minmus.parse(dump)
     -- 
     parser:next_byte() -- sizeupvalues (?)
     local res = parser:next_fn()
-    print(Minmus.dump(res))
+    --print(Minmus.dump(res))
     --print(dump:sub(parser.pointer))
     return res
 end
 
 function Minmus.compile(code)
     local parsed = Minmus.parse(string.dump(load(code)))
-    local interpreter = Minmus.new_interpreter(parsed)
+    return Minmus.new_interpreter(parsed)
+end
+
+function Minmus.compile_and_run(code)
+    local interpreter = Minmus.compile(code)
     while interpreter.frame ~= nil do
         interpreter:step()
     end
@@ -393,23 +449,25 @@ function Minmus.compile(code)
 end
 
 --Minmus.parse(string.dump(load("return 'asdfasdf'..tostring(1+2+3)")))
-if false then
-    Minmus.parse(string.dump(load([[
+if true then
+    Minmus.compile_and_run([[
         local a = 5
         b = 3
         function lalala()
             return a + b
         end
         return lalala()
-    ]])))
-end
-Minmus.compile([[
-    function get_b()
-        return 2
-    end
-
-    local a = 1
-    local b = get_b()
-    local c = a + b
-    return c
     ]])
+end
+if false then
+    Minmus.compile_and_run([[
+        function get_b()
+            return 2
+        end
+
+        local a = 1
+        local b = get_b()
+        local c = a + b
+        return c
+    ]])
+end
