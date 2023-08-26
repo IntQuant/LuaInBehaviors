@@ -35,6 +35,40 @@ Minmus.typetags = {
     LUA_VLNGSTR = makevariant(Minmus.bases.LUA_TSTRING, 1),
 }
 
+local binops = {}
+local binops_list = {"+", "-", "*", "%", "^", "/", "//", "&", "|", "~"}
+
+for op_i = 1, #binops_list do
+    local binop = binops_list[op_i]
+    print("Created op", op_i, binop)
+    local src_const = [[
+        return function(self, ins)
+            local a, b, c = self:e_ABC(ins)
+            local const = self.frame.fn.constants
+            regs[a] = {
+                val = regs[b].val]] .. binop .. [[const[c].val
+            }
+            self.frame.pc = self.frame.pc + 1 -- TODO: metatable support
+        end
+    ]]
+    local src_regs = [[
+        return function(self, ins)
+            local a, b, c = self:e_ABC(ins)
+            local regs = self.frame.regs
+            regs[a] = {
+                val = regs[b].val]] .. binop .. [[regs[c].val
+            }
+            self.frame.pc = self.frame.pc + 1 -- TODO: metatable support
+        end
+    ]]
+    local fn_const = load(src_const)()
+    local fn_regs = load(src_regs)()
+    binops[22+op_i-1] = fn_const
+    binops[34+op_i-1] = fn_regs
+end
+
+Minmus.binops = binops
+
 -- https://stackoverflow.com/questions/9168058/how-to-dump-a-table-to-console
 function Minmus.dump(o, level)
     if level == nil then
@@ -351,12 +385,13 @@ function Minmus.new_interpreter(parsed_fn)
         --print(Minmus.dump(self.frame.upvals))
     end
 
-    interpreter[34] = function(self, ins) -- OP_ADD
+    interpreter[21] = function(self, ins) -- OP_ADDI
         Minmus.dump_regs(self.frame.regs)
-        local a, b, c = self:e_ABC(ins)
+        local a, b, _ = self:e_ABC(ins)
+        local c = (ins >> (7+8+1+8)) - 127
         local regs = self.frame.regs
         regs[a] = {
-            val = regs[b].val + regs[c].val
+            val = regs[b].val + c
         }
         self.frame.pc = self.frame.pc + 1 -- TODO: metatable support
     end
@@ -365,6 +400,33 @@ function Minmus.new_interpreter(parsed_fn)
         local sj = (ins >> 7) - (((1 << 25) - 1) >> 1)
         print("Jmp", sj)
         self.frame.pc = self.frame.pc + sj
+    end
+
+    interpreter[57] = function(self, ins) -- OP_EQ
+        local a, b, c = self:e_ABC(ins)
+        local k = self:e_k(ins) > 0
+        local regs = self.frame.regs
+        if regs[a].val == regs[b].val ~= k then
+           self.frame.pc = self.frame.pc + 1 -- TODO metatables
+        end
+    end
+
+    interpreter[58] = function(self, ins) -- OP_LT
+        local a, b, c = self:e_ABC(ins)
+        local k = self:e_k(ins) > 0
+        local regs = self.frame.regs
+        if regs[a].val < regs[b].val ~= k then
+           self.frame.pc = self.frame.pc + 1 -- TODO metatables and error handling
+        end
+    end
+
+    interpreter[59] = function(self, ins) -- OP_LE
+        local a, b, c = self:e_ABC(ins)
+        local k = self:e_k(ins) > 0
+        local regs = self.frame.regs
+        if regs[a].val <= regs[b].val ~= k then
+           self.frame.pc = self.frame.pc + 1 -- TODO metatables and error handling
+        end
     end
 
     interpreter[66] = function(self, ins) -- OP_TEST
@@ -517,6 +579,10 @@ function Minmus.new_interpreter(parsed_fn)
         frame.pc = frame.pc + 1
         interpreter[opcode](interpreter, ins)
         --print(Minmus.dump(frame.regs))
+    end
+
+    for k, v in pairs(Minmus.binops) do
+        interpreter[k] = v
     end
 
     return interpreter

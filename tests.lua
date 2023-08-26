@@ -14,6 +14,25 @@ function test(code, eres)
 end
 
 test([[
+    local a = 10
+    local b = 3
+    a = a + b
+    a = a - b
+    a = a * b
+    a = a / b
+    return a
+]], 10)
+
+test([[
+    local i = 0
+    local t = 10
+    while i < t do
+        i = i + 1
+    end
+    return i
+]], 10)
+
+test([[
     local v = true
     if v then
         a = 5
