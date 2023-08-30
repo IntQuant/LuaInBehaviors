@@ -12,6 +12,7 @@ end
 Minmus.kinds = {
     TABLE = "table",
     CLOSURE = "closure",
+    NATIVEFN = "nativefn"
 }
 
 Minmus.bases = {
@@ -303,15 +304,19 @@ function Minmus.new_frame(parsed_fn, prev_frame)
     }
 end
 
-function Minmus.new_interpreter(parsed_fn)
+function Minmus.new_interpreter()
     local interpreter = {}
-    local pseudoframe = {
-        regs = {[0] = {}},
-        upvals = {},
-        is_pseudoframe = true,
-    }
-    interpreter.frame = Minmus.new_frame(parsed_fn, pseudoframe)
-    interpreter.last_ret = nil
+
+    function interpreter:from_fn(parsed_fn, env)
+        local pseudoframe = {
+            regs = {[0] = (env or {})},
+            upvals = {},
+            is_pseudoframe = true,
+        }
+        self.frame = Minmus.new_frame(parsed_fn, pseudoframe)
+        self.tables = {}
+        self.last_ret = nil
+    end
 
     function interpreter:e_ABC(ins)
         local a = (ins >> 7) & 0xff
@@ -390,15 +395,48 @@ function Minmus.new_interpreter(parsed_fn)
     -- tables have to be stored in a special way so that:
     -- 1. the original key can be retrieved
     -- 2. metatables can be supported
+    -- 3. serialization does not have to support multiple references to the same table
+    
+    
+    -- function interpreter:pseudotable_new(from)
+    --     local ind = #self.tables+1
+    --     local new_table = {}
+    --     self.tables[ind] = new_table
+    --     for k, v in pairs(from) do
+    --         if type(v) == "table" then
+    --             new_table[k] = self:pseudotable_new(v)
+    --         else
+    --             new_table[k] = v
+    --         end
+    --     end
+    --     return {
+    --         kind = Minmus.kinds.TABLE,
+    --         val = ind,
+    --     }
+    -- end
+
+    function interpreter:pseudotable_new(from)
+        return {
+            kind = Minmus.kinds.TABLE,
+            val = from,
+        }
+    end
+
     function interpreter:pseudotable_set(tbl, ind, val)
         -- TODO error handling
-        tbl[ind.val] = {
+        self:assert(tbl.kind == Minmus.kinds.TABLE, "Can only index tables")
+        --local tbl_actual = self.tables[tbl.val]
+        local tbl_actual = tbl.val
+        tbl_actual[ind.val] = {
             key = ind,
             item = val,
         }
     end
     function interpreter:pseudotable_get(tbl, ind)
-        return tbl[ind.val].item
+        self:assert(tbl.kind == Minmus.kinds.TABLE, "Can only index tables")
+        --local tbl_actual = self.tables[tbl.val]
+        local tbl_actual = tbl.val
+        return tbl_actual[ind.val].item
     end
 
     interpreter[12] = function(self, ins) -- OP_GETTABLE
@@ -463,10 +501,7 @@ function Minmus.new_interpreter(parsed_fn)
     interpreter[19] = function(self, ins) -- OP_NEWTABLE
         local a, _, _ = self:e_ABC(ins)
         self.frame.pc = self.frame.pc + 1
-        self.frame.regs[a] = {
-            kind = Minmus.kinds.TABLE,
-            val = {},
-        }
+        self.frame.regs[a] = self:pseudotable_new({})
     end
 
     interpreter[21] = function(self, ins) -- OP_ADDI
@@ -521,7 +556,7 @@ function Minmus.new_interpreter(parsed_fn)
         end
     end
     
-    interpreter[68] = function(self, ins) -- OP_CALL
+    interpreter[68] = function(self, ins, step_ctx) -- OP_CALL
         print("Call")
         local a, b, c = self:e_ABC(ins)
         if b == 0 then
@@ -529,10 +564,16 @@ function Minmus.new_interpreter(parsed_fn)
         end
         self.frame.ret_info = {a, c}
         local cls = self.frame.regs[a]
-        assert(cls.kind == Minmus.kinds.CLOSURE)
-        local new_frame = Minmus.new_frame(cls.proto, self.frame)
-        new_frame.prev_frame = self.frame
-        self.frame = new_frame
+        if cls.kind == Minmus.kinds.CLOSURE then
+            local new_frame = Minmus.new_frame(cls.proto, self.frame)
+            new_frame.prev_frame = self.frame
+            self.frame = new_frame
+        elseif cls.kind == Minmus.kinds.NATIVEFN then
+            local rets = table.pack(step_ctx.native_fns[cls.val]())
+            self:ret(rets, true)
+        else
+            return self:err("Cannot call this type")
+        end
         --print(Minmus.dump(self.frame))
     end
 
@@ -590,10 +631,10 @@ function Minmus.new_interpreter(parsed_fn)
         local limit = tonumber(regs[a+1].val)
         local step = tonumber(regs[a+2].val)
         if init == nil or limit == nil or step == nil then
-            self:err("could not convert 'for' vars to numbers")
+            return self:err("could not convert 'for' vars to numbers")
         end
         if step == 0 then
-            self:err("'for' step is zero")
+            return self:err("'for' step is zero")
         end
         
         local stepsign = 0 < step
@@ -630,14 +671,16 @@ function Minmus.new_interpreter(parsed_fn)
         -- nothing for now
     end
 
-    function interpreter:ret(retvals)
+    function interpreter:ret(retvals, no_frame_change)
         --print("Retval", Minmus.dump(retvals))
-        self.last_ret = retvals
-        if self.frame.prev_frame.is_pseudoframe then
-            self.frame = nil
-            return -- no more code left to run
+        if not no_frame_change then
+            self.last_ret = retvals
+            if self.frame.prev_frame.is_pseudoframe then
+                self.frame = nil
+                return -- no more code left to run
+            end
+            self.frame = self.frame.prev_frame
         end
-        self.frame = self.frame.prev_frame
         
         -- copy retvals to registers
         local a = self.frame.ret_info[1]
@@ -650,19 +693,29 @@ function Minmus.new_interpreter(parsed_fn)
         end
     end
 
+    function interpreter:assert(check, msg)
+        if not check then
+            self.err(msg)
+        end
+    end
+
     function interpreter:err(err)
         print(err)
         assert(false)
     end
 
-    function interpreter:step()
+    function interpreter:step(step_ctx)
         local frame = self.frame
         local ins = frame.fn.code[frame.pc]
         local opcode = ins & 127
         print("Opcode", opcode, ins)
         frame.pc = frame.pc + 1
-        interpreter[opcode](interpreter, ins)
+        interpreter[opcode](interpreter, ins, step_ctx)
         --print(Minmus.dump(frame.regs))
+    end
+
+    function interpreter:save()
+        return {self.frame}
     end
 
     for k, v in pairs(Minmus.autoops) do
@@ -696,13 +749,15 @@ function Minmus.parse(dump)
     return res
 end
 
-function Minmus.compile(code)
+function Minmus.compile(code, env)
     local parsed = Minmus.parse(string.dump(load(code)))
-    return Minmus.new_interpreter(parsed)
+    local interpreter = Minmus.new_interpreter()
+    interpreter:from_fn(parsed, env)
+    return interpreter
 end
 
-function Minmus.compile_and_run(code)
-    local interpreter = Minmus.compile(code)
+function Minmus.compile_and_run(code, env)
+    local interpreter = Minmus.compile(code, env)
     while interpreter.frame ~= nil do
         interpreter:step()
     end
