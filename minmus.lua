@@ -39,7 +39,7 @@ Minmus.typetags = {
 
 local autoops = {}
 local binops_list = {"+", "-", "*", "%", "^", "/", "//", "&", "|", "~"}
-local unops_list = {"-", "~", "not", "#"}
+local unops_list = {"-", "~", "not"}
 
 for op_i = 1, #binops_list do
     local binop = binops_list[op_i]
@@ -398,35 +398,35 @@ function Minmus.new_interpreter()
     -- 3. serialization does not have to support multiple references to the same table
     
     
-    -- function interpreter:pseudotable_new(from)
-    --     local ind = #self.tables+1
-    --     local new_table = {}
-    --     self.tables[ind] = new_table
-    --     for k, v in pairs(from) do
-    --         if type(v) == "table" then
-    --             new_table[k] = self:pseudotable_new(v)
-    --         else
-    --             new_table[k] = v
-    --         end
-    --     end
-    --     return {
-    --         kind = Minmus.kinds.TABLE,
-    --         val = ind,
-    --     }
-    -- end
-
     function interpreter:pseudotable_new(from)
+        local ind = #self.tables+1
+        local new_table = {}
+        self.tables[ind] = new_table
+        for k, v in pairs(from) do
+            if type(v) == "table" then
+                new_table[k] = self:pseudotable_new(v)
+            else
+                new_table[k] = v
+            end
+        end
         return {
             kind = Minmus.kinds.TABLE,
-            val = from,
+            val = ind,
         }
     end
+
+    -- function interpreter:pseudotable_new(from)
+    --     return {
+    --         kind = Minmus.kinds.TABLE,
+    --         val = from,
+    --     }
+    -- end
 
     function interpreter:pseudotable_set(tbl, ind, val)
         -- TODO error handling
         self:assert(tbl.kind == Minmus.kinds.TABLE, "Can only index tables")
-        --local tbl_actual = self.tables[tbl.val]
-        local tbl_actual = tbl.val
+        local tbl_actual = self.tables[tbl.val]
+        --local tbl_actual = tbl.val
         tbl_actual[ind.val] = {
             key = ind,
             item = val,
@@ -434,8 +434,8 @@ function Minmus.new_interpreter()
     end
     function interpreter:pseudotable_get(tbl, ind)
         self:assert(tbl.kind == Minmus.kinds.TABLE, "Can only index tables")
-        --local tbl_actual = self.tables[tbl.val]
-        local tbl_actual = tbl.val
+        local tbl_actual = self.tables[tbl.val]
+        --local tbl_actual = tbl.val
         return tbl_actual[ind.val].item
     end
 
@@ -513,6 +513,15 @@ function Minmus.new_interpreter()
             val = regs[b].val + c
         }
         self.frame.pc = self.frame.pc + 1 -- TODO: metatable support
+    end
+
+    interpreter[52] = function(self, ins)
+        local a, b, c = self:e_ABC(ins)
+        local regs = self.frame.regs
+        regs[a] = {
+            val = #self.tables[regs[b].val]
+        }
+        -- TODO: metatable support
     end
 
     interpreter[56] = function(self, ins) -- OP_JMP
